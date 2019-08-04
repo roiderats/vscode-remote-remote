@@ -1,0 +1,146 @@
+#!/bin/bash
+#
+# vscode-remote-remote
+# Remotely command VSCode Remote extension to open files from any terminal
+#
+# Hosted at: https://github.com/roiderats/vscode-remote-remote
+
+
+# set -o xtrace
+pipefile=/tmp/vscode_remote_opener.$USER.pipe
+pidfile=/tmp/vscode_remote_opener.$USER.pid
+# set to "y" to get annoying noise on your embedded terminal
+
+verbose=
+
+say() {
+    if [ "$verbose" == "y" ]; then
+        echo $*
+    fi
+}
+
+listen_almost_forever() {
+    trap "rm -f $pipefile $pidfile" EXIT
+    if [[ ! -p $pipefile ]]; then
+        mkfifo $pipefile
+    fi
+
+    codebin=$( get_serversh_name_from_parents | sed -e "s/^sh //;s/server.sh\$/bin\/code/" )
+    if [ ! "$(realpath $(which code))" == "$(realpath $codebin)" ]; then	
+        # No traces of VSCode remote found in parent processes
+        # We Must be quiet or ssh tunnel establishment fails
+        return
+    fi
+
+    say Background process now listening $pipefile
+    while read  line <$pipefile
+    do
+            if [[ "$line" == "-quit" ]]; then
+                break
+            fi
+            if [[ "${line:0:7}" == "--wait " ]]; then
+                line=${line#"--wait "}
+                $codebin --wait $line &
+                # send waiting pid back thru pipe
+                echo $! > $pipefile
+            elif [[ "${line:0:1}" == "/" ]]; then
+                if [ -f $line ]; then
+                    $codebin $line
+                else
+                    say file does note exist: $line
+                fi
+            else
+                say not absolute path: $line
+            fi
+            say I just did something. Looping forever or until \"-quit\"
+    done
+    say Reader exiting
+}
+
+
+get_serversh_name_from_parents() {
+    # server.sh is something we can use to detect we're running inside VSCode terminal, and later we can
+    # manipulate it's path to find remote-extension's "code" binary that actually(from this script's point
+    # of view) does the opening of file to the editor
+    pidarr=($$)
+    while [ ${pidarr[${#pidarr[@]}-1]} -ne 1 ]
+    do
+        pidarr+=($(ps --pid ${pidarr[${#pidarr[@]}-1]} -o ppid --no-header))
+    done
+    servershname=$(ps -o cmd ${pidarr[@]/#/-p } | egrep -o "^sh .*/\.vscode-server/bin/[0-9a-f]{40}/server.sh" | cut -c 4-)
+    if [ -x "$servershname" ]; then
+        echo $servershname
+    else
+        echo Return Something Random
+    fi
+}
+
+
+bgprocess_main() {
+    if ! pgrep --pidfile $pidfile >/dev/null 2>&1; then
+        echo $$ > $pidfile
+        listen_almost_forever
+    else
+        # We are running already, just be quiet so SSH tunnel won't die
+        echo already running > /dev/null
+    fi
+}
+
+
+print_help() {
+    cat << ENDOFHELP
+Open files to VSCode with remote extension from terminals outside VSCode by 
+running a listener inside VSCode terminal
+Usage: 
+$0 [-w|--wait] filename
+    to request background-script running inside VSCode terminal to open file
+
+$0 -quit
+    kill the listener
+
+Installation:
+    1. Place this script somewhere among your \$PATH
+    2. Place this line into your \$HOME/.bashrc:
+    if ! pgrep --pidfile "/tmp/vscode_remote_opener.\$USER.pid" \ 
+            >/dev/null 2>&1; then
+        $(realpath $(which $0)) -listener &
+    fi
+
+Change the script name to whatever you like, "coder" was just selected to use
+muscle memory of opening VSCode.
+
+There is an assumption that background process starting relies: VSCode starts
+a bash-shell at launch. This seems to be true by default in VSCode version 
+1.36.1(non-Insiders build) but your mileage may vary. Also if you close that
+terminal, background process likely dies. Opening new terminal there should
+then launch background process again.
+
+TODO: 
+- can we change this script name to "code" and correctly guess if file is to
+be opened to remote or local VSCode? Env.var DISPLAY is set/unset is not 
+enough. Tip: 'which -a code' finds all from PATH
+- pass more than 1 filename-args at once
+version: 2019.08.04.01
+
+ENDOFHELP
+}
+
+
+if [ $# -eq 0 ] || [ "$1" == "-h" ] || [ "$1" == "--help" ]; then
+    print_help
+elif [ "$1" == "-quit" ]; then
+    echo -quit > $pipefile
+elif [ "$1" == "-listener" ]; then
+    bgprocess_main
+elif [ "$1" == "--wait" ] || [ "$1" == "-w" ]; then
+    say remote opening and waiting $2
+    ( echo -n "--wait " ; realpath $2 ) > $pipefile
+    read pidtowait < $pipefile
+    while [ -d /proc/$pidtowait ]; do
+        sleep 1 # command "wait" can only wait for own children
+    done
+else
+    say remote opening $1
+    # we need absolute path
+    realpath $1 > $pipefile
+fi
