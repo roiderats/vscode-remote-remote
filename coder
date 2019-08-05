@@ -103,7 +103,10 @@ Installation:
     2. Place this line into your \$HOME/.bashrc:
     if ! pgrep --pidfile "/tmp/vscode_remote_opener.\$USER.pid" \ 
             >/dev/null 2>&1; then
-        $(realpath $(which $0)) -listener &
+        find /tmp -maxdepth 1 -user \$USER -name "vscode-ipc*.sock"| grep -q sock
+        if [ \$? -eq 0 ]; then
+            $(realpath $(which $0)) -listener &
+        fi
     fi
 
 Change the script name to whatever you like, "coder" was just selected to use
